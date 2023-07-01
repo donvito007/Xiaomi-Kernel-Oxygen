@@ -9,12 +9,13 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/binfmts.h>
 #include <linux/kthread.h>
 #include <trace/events/power.h>
+#include <linux/sched/sysctl.h>
 
 #include "sched.h"
 #include "walt.h"
-#include <trace/events/walt.h>
 
 
 struct waltgov_tunables {
@@ -61,6 +62,7 @@ struct waltgov_policy {
 	struct	mutex		work_lock;
 	struct	kthread_worker	worker;
 	struct task_struct	*thread;
+	bool			work_in_progress;
 
 	bool			limits_changed;
 	bool			need_freq_update;
@@ -112,7 +114,23 @@ static bool waltgov_should_update_freq(struct waltgov_policy *wg_policy, u64 tim
 	return delta_ns >= wg_policy->min_rate_limit_ns;
 }
 
+static inline bool use_pelt(void)
+{
+#ifdef CONFIG_SCHED_WALT
+	return false;
+#else
+	return true;
+#endif
+}
 
+static inline bool conservative_pl(void)
+{
+#ifdef CONFIG_SCHED_WALT
+	return sysctl_sched_conservative_pl;
+#else
+	return false;
+#endif
+}
 
 static bool waltgov_up_down_rate_limit(struct waltgov_policy *wg_policy, u64 time,
 				     unsigned int next_freq)
@@ -166,6 +184,9 @@ static void waltgov_track_cycles(struct waltgov_policy *wg_policy,
 	u64 delta_ns, cycles;
 	u64 next_ws = wg_policy->last_ws + sched_ravg_window;
 
+	if (use_pelt())
+		return;
+
 	upto = min(upto, next_ws);
 	/* Track cycles in current window */
 	delta_ns = upto - wg_policy->last_cyc_update_time;
@@ -181,6 +202,9 @@ static void waltgov_calc_avg_cap(struct waltgov_policy *wg_policy, u64 curr_ws,
 {
 	u64 last_ws = wg_policy->last_ws;
 	unsigned int avg_freq;
+
+	if (use_pelt())
+		return;
 
 	BUG_ON(curr_ws < last_ws);
 	if (curr_ws <= last_ws)
@@ -214,6 +238,8 @@ static void waltgov_deferred_update(struct waltgov_policy *wg_policy, u64 time,
 				  unsigned int next_freq)
 {
 	
+	if (use_pelt())
+		wg_policy->work_in_progress = true;
 	irq_work_queue(&wg_policy->irq_work);
 }
 
@@ -254,8 +280,7 @@ static unsigned int get_next_freq(struct waltgov_policy *wg_policy,
 			freq = wg_policy->tunables->adaptive_high_freq;
 	}
 
-	trace_waltgov_next_freq(policy->cpu, util, max, raw_freq, freq, policy->min, policy->max,
-				wg_policy->cached_raw_freq, wg_policy->need_freq_update);
+	trace_sugov_next_freq(policy->cpu, util, max, freq);
 
 	if (wg_policy->cached_raw_freq && freq == wg_policy->cached_raw_freq &&
 		!wg_policy->need_freq_update)
@@ -270,11 +295,128 @@ static unsigned int get_next_freq(struct waltgov_policy *wg_policy,
 
 	return final_freq;
 }
+/*
+extern long
+schedtune_cpu_margin_with(unsigned long util, int cpu, struct task_struct *p);
+*/
+/*
+ * This function computes an effective utilization for the given CPU, to be
+ * used for frequency selection given the linear relation: f = u * f_max.
+ *
+ * The scheduler tracks the following metrics:
+ *
+ *   cpu_util_{cfs,rt,dl,irq}()
+ *   cpu_bw_dl()
+ *
+ * Where the cfs,rt and dl util numbers are tracked with the same metric and
+ * synchronized windows and are thus directly comparable.
+ *
+ * The @util parameter passed to this function is assumed to be the aggregation
+ * of RT and CFS util numbers. The cases of DL and IRQ are managed here.
+ *
+ * The cfs,rt,dl utilization are the running times measured with rq->clock_task
+ * which excludes things like IRQ and steal-time. These latter are then accrued
+ * in the irq utilization.
+ *
+ * The DL bandwidth number otoh is not a measured metric but a value computed
+ * based on the task model parameters and gives the minimal utilization
+ * required to meet deadlines.
+ */
+unsigned long walt_cpu_util(int cpu, unsigned long util_cfs,
+				 unsigned long max, enum schedutil_type type,
+				 struct task_struct *p)
+{
+	unsigned long dl_util, util, irq;
+	struct rq *rq = cpu_rq(cpu);
 
+	if (sched_feat(SUGOV_RT_MAX_FREQ) && !IS_BUILTIN(CONFIG_UCLAMP_TASK) &&
+	    type == FREQUENCY_UTIL && rt_rq_is_runnable(&rq->rt)) {
+		return max;
+	}
+
+	/*
+	 * Early check to see if IRQ/steal time saturates the CPU, can be
+	 * because of inaccuracies in how we track these -- see
+	 * update_irq_load_avg().
+	 */
+	irq = cpu_util_irq(rq);
+	if (unlikely(irq >= max))
+		return max;
+
+	/*
+	 * Because the time spend on RT/DL tasks is visible as 'lost' time to
+	 * CFS tasks and we use the same metric to track the effective
+	 * utilization (PELT windows are synchronized) we can directly add them
+	 * to obtain the CPU's actual utilization.
+	 *
+	 * CFS and RT utilization can be boosted or capped, depending on
+	 * utilization clamp constraints requested by currently RUNNABLE
+	 * tasks.
+	 * When there are no CFS RUNNABLE tasks, clamps are released and
+	 * frequency will be gracefully reduced with the utilization decay.
+	 */
+	util = util_cfs + cpu_util_rt(rq);
+	if (type == FREQUENCY_UTIL)
+/*#ifdef CONFIG_SCHED_TUNE
+		util += schedtune_cpu_margin_with(util, cpu, p);
+#else*/
+		util = uclamp_rq_util_with(rq, util, p);
+//#endif
+
+	dl_util = cpu_util_dl(rq);
+
+	/*
+	 * For frequency selection we do not make cpu_util_dl() a permanent part
+	 * of this sum because we want to use cpu_bw_dl() later on, but we need
+	 * to check if the CFS+RT+DL sum is saturated (ie. no idle time) such
+	 * that we select f_max when there is no idle time.
+	 *
+	 * NOTE: numerical errors or stop class might cause us to not quite hit
+	 * saturation when we should -- something for later.
+	 */
+	if (util + dl_util >= max)
+		return max;
+
+	/*
+	 * OTOH, for energy computation we need the estimated running time, so
+	 * include util_dl and ignore dl_bw.
+	 */
+	if (type == ENERGY_UTIL)
+		util += dl_util;
+
+	/*
+	 * There is still idle time; further improve the number by using the
+	 * irq metric. Because IRQ/steal time is hidden from the task clock we
+	 * need to scale the task numbers:
+	 *
+	 *              1 - irq
+	 *   U' = irq + ------- * U
+	 *                max
+	 */
+	util = scale_irq_capacity(util, irq, max);
+	util += irq;
+
+	/*
+	 * Bandwidth required by DEADLINE must always be granted while, for
+	 * FAIR and RT, we use blocked utilization of IDLE CPUs as a mechanism
+	 * to gracefully reduce the frequency when no tasks show up for longer
+	 * periods of time.
+	 *
+	 * Ideally we would like to set bw_dl as min/guaranteed freq and util +
+	 * bw_dl as requested freq. However, cpufreq is not yet ready for such
+	 * an interface. So, we only do the latter for now.
+	 */
+	if (type == FREQUENCY_UTIL)
+		util += cpu_bw_dl(rq);
+
+	return min(max, util);
+}
+
+#ifdef CONFIG_SCHED_WALT
 static unsigned long waltgov_get_util(struct waltgov_cpu *wg_cpu)
 {
 	struct rq *rq = cpu_rq(wg_cpu->cpu);
-	unsigned long max = arch_scale_cpu_capacity(NULL, wg_cpu->cpu);
+	unsigned long max = arch_scale_cpu_capacity(wg_cpu->cpu);
 	unsigned long util;
 
 	wg_cpu->max = max;
@@ -282,6 +424,24 @@ static unsigned long waltgov_get_util(struct waltgov_cpu *wg_cpu)
 	util = cpu_util_freq_walt(wg_cpu->cpu, &wg_cpu->walt_load);
 	return uclamp_rq_util_with(rq, util, NULL);
 }
+#else
+static unsigned long waltgov_get_util(struct waltgov_cpu *wg_cpu)
+{
+	struct rq *rq = cpu_rq(wg_cpu->cpu);
+	unsigned long max = arch_scale_cpu_capacity(wg_cpu->cpu);
+	unsigned long util;
+
+	wg_cpu->max = max;
+#ifdef CONFIG_SCHED_TUNE
+	util = cpu_util_cfs(rq);
+#else
+	util = cpu_util_freq(wg_cpu->cpu, NULL) - cpu_util_rt(rq);
+#endif
+
+	return walt_cpu_util(wg_cpu->cpu, util, max,
+				  FREQUENCY_UTIL, NULL);
+}
+#endif
 
 #define NL_RATIO 75
 #define DEFAULT_HISPEED_LOAD 90
@@ -322,6 +482,9 @@ static void waltgov_walt_adjust(struct waltgov_cpu *wg_cpu, unsigned long cpu_ut
 	unsigned long min_util;
 	int target_boost;
 
+	if (use_pelt())
+		return;
+
 	target_boost = 100 + find_target_boost(*util, wg_policy, &min_util);
 	*util = mult_frac(*util, target_boost, 100);
 	*util = max(*util, min_util);
@@ -340,7 +503,7 @@ static void waltgov_walt_adjust(struct waltgov_cpu *wg_cpu, unsigned long cpu_ut
 		*util = *max;
 
 	if (wg_policy->tunables->pl) {
-		if (sysctl_sched_conservative_pl)
+		if (conservative_pl())
 			pl = mult_frac(pl, TARGET_LOAD, 100);
 		*util = max(*util, pl);
 	}
@@ -353,10 +516,12 @@ static inline unsigned long target_util(struct waltgov_policy *wg_policy,
 
 	util = freq_to_util(wg_policy, freq);
 
+#ifdef CONFIG_SCHED_WALT
 	if (wg_policy->max == min_max_possible_capacity &&
 		util >= wg_policy->tunables->target_load_thresh)
 		util = mult_frac(util, 94, 100);
 	else
+#endif
 		util = mult_frac(util, TARGET_LOAD, 100);
 
 	return util;
@@ -429,7 +594,7 @@ static void waltgov_update_freq(struct update_util_data *hook, u64 time,
 	waltgov_calc_avg_cap(wg_policy, wg_cpu->walt_load.ws,
 			   wg_policy->policy->cur);
 
-	trace_waltgov_util_update(wg_cpu->cpu, wg_cpu->util, wg_policy->avg_cap,
+	trace_sugov_util_update(wg_cpu->cpu, wg_cpu->util, wg_policy->avg_cap,
 				wg_cpu->max, wg_cpu->walt_load.nl,
 				wg_cpu->walt_load.pl,
 				wg_cpu->walt_load.rtgb_active, flags);
@@ -459,6 +624,8 @@ static void waltgov_work(struct kthread_work *work)
 
 	raw_spin_lock_irqsave(&wg_policy->update_lock, flags);
 	freq = wg_policy->next_freq;
+	if (use_pelt())
+		wg_policy->work_in_progress = false;
 	waltgov_track_cycles(wg_policy, wg_policy->policy->cur,
 			   ktime_get_ns());
 	raw_spin_unlock_irqrestore(&wg_policy->update_lock, flags);
@@ -1094,6 +1261,7 @@ static int waltgov_start(struct cpufreq_policy *policy)
 	update_min_rate_limit_ns(wg_policy);
 	wg_policy->last_freq_update_time	= 0;
 	wg_policy->next_freq			= 0;
+	wg_policy->work_in_progress		= false;
 	wg_policy->limits_changed		= false;
 	wg_policy->need_freq_update		= false;
 	wg_policy->cached_raw_freq		= 0;
