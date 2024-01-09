@@ -1,6 +1,7 @@
 /*
  * TEE driver for goodix fingerprint sensor
  * Copyright (C) 2016 Goodix
+ * Copyright (C) 2021 XiaoMi, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -12,10 +13,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#define DEBUG
 #define pr_fmt(fmt)     KBUILD_MODNAME ": " fmt
-
-#define GOODIX_DRM_INTERFACE_WA
 
 #include <linux/init.h>
 #include <linux/module.h>
@@ -39,15 +37,10 @@
 #include <linux/regulator/consumer.h>
 #include <linux/of_gpio.h>
 #include <linux/timer.h>
-#include <linux/notifier.h>
 #include <linux/fb.h>
 #include <linux/pm_qos.h>
 #include <linux/cpufreq.h>
 #include <linux/pm_wakeup.h>
-#include <drm/drm_bridge.h>
-#ifndef GOODIX_DRM_INTERFACE_WA
-#include <drm/drm_notifier.h>
-#endif
 
 #include "gf_spi.h"
 
@@ -75,70 +68,12 @@
 
 #define N_SPI_MINORS			32	/* ... up to 256 */
 
-
-#if IS_ENABLED(CONFIG_BOARD_PSYCHE)
-#define MI_FP_3V
-static struct regulator *p_3v0_vreg = NULL;
-static int disable_regulator_3V0(struct regulator *vreg);
-static int enable_regulator_3V0(struct device *dev,struct regulator **pp_vreg);
-
-static int disable_regulator_3V0(struct regulator *vreg)
-{
-	pr_err(" xiaomi put regulator: %s , end it\n", __func__);
-	if(vreg == NULL) {
-            pr_err("vreg is null!");
-	    return 0;
-	}
-	devm_regulator_put(vreg);
-	vreg = NULL;
-	return 0;
-}
-
-static int enable_regulator_3V0(struct device *dev, struct regulator **pp_vreg)
-{
-	int rc = 0;
-	struct regulator *vreg;
-	// vreg = devm_regulator_get(dev, "pm8350c_l11");
-	vreg = devm_regulator_get(dev, "l13a_vdd");
-	if (IS_ERR(vreg)) {
-		dev_err(dev, "fp %s: no of vreg found\n", __func__);
-		return PTR_ERR(vreg);
-	} else {
-		dev_err(dev, "fp %s: of vreg successful found\n", __func__);
-	}
-
-        rc = regulator_set_voltage(vreg, 3204000, 3204000);
-
-	if (rc) {
-		dev_err(dev, "xiaomi %s: set voltage failed\n",__func__);
-		return rc;
-	}
-
-	//rc = regulator_set_load(vreg, 200000);
-
-	//if (rc) {
-	//	dev_err(dev, "xiaomi set load faild rc002: %d , %s: \n",rc, __func__);
-	//	return rc;
-	//}
-
-	rc = regulator_enable(vreg);
-
-	if (rc) {
-		dev_err(dev, "xiaomi %s: enable voltage failed\n", __func__);
-		return rc;
-	}
-
-	*pp_vreg = vreg;
-	return rc;
-}
-#endif
-
 static int SPIDEV_MAJOR;
 
 static DECLARE_BITMAP(minors, N_SPI_MINORS);
 static LIST_HEAD(device_list);
 static DEFINE_MUTEX(device_list_lock);
-static struct wakeup_source *fp_wakelock = NULL;
+static struct wakeup_source *fp_wakelock;
 static struct gf_dev gf;
 
 struct gf_key_map maps[] = {
@@ -433,9 +368,6 @@ static long gf_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	gf_nav_event_t nav_event = GF_NAV_NONE;
 #endif
 	int retval = 0;
-#if IS_ENABLED(CONFIG_BOARD_PSYCHE)
-	int status = 0;
-#endif
 	u8 netlink_route = NETLINK_TEST;
 	struct gf_ioc_chip_info info;
 
@@ -546,13 +478,6 @@ static long gf_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		if (gf_dev->device_available == 1) {
 			pr_debug("Sensor has already powered-on.\n");
 		} else {
-#if IS_ENABLED(CONFIG_BOARD_PSYCHE)
-			status = enable_regulator_3V0(&gf_dev->spi->dev,&p_3v0_vreg);
-			if (status) {
-				pr_err("enable regulator failed and disable it.\n");
-				disable_regulator_3V0(p_3v0_vreg);
-			}
-#endif
 			gf_power_on(gf_dev);
 		}
 
@@ -613,36 +538,16 @@ static long gf_compat_ioctl(struct file *filp, unsigned int cmd,
 }
 #endif /*CONFIG_COMPAT */
 
-#ifndef GOODIX_DRM_INTERFACE_WA
-static void notification_work(struct work_struct *work)
-{
-	pr_debug("%s unblank\n", __func__);
-	dsi_bridge_interface_enable(FP_UNLOCK_REJECTION_TIMEOUT);
-}
-#endif
-
 static irqreturn_t gf_irq(int irq, void *handle)
 {
-	struct gf_dev *gf_dev = &gf;
 #if defined(GF_NETLINK_ENABLE)
 	char temp[4] = { 0x0 };
 	uint32_t key_input = 0;
 	temp[0] = GF_NET_EVENT_IRQ;
 	pr_debug("%s enter\n", __func__);
-	if (fp_wakelock != NULL)
-		__pm_wakeup_event(fp_wakelock, WAKELOCK_HOLD_TIME);
+	__pm_wakeup_event(fp_wakelock, WAKELOCK_HOLD_TIME);
 	sendnlmsg(temp);
 
-	if ((gf_dev->wait_finger_down == true)
-	    && (gf_dev->device_available == 1) && (gf_dev->fb_black == 1)) {
-		key_input = KEY_RIGHT;
-		input_report_key(gf_dev->input, key_input, 1);
-		input_sync(gf_dev->input);
-		input_report_key(gf_dev->input, key_input, 0);
-		input_sync(gf_dev->input);
-		gf_dev->wait_finger_down = false;
-		schedule_work(&gf_dev->work);
-	}
 #elif defined (GF_FASYNC)
 	struct gf_dev *gf_dev = &gf;
 
@@ -833,76 +738,6 @@ static const struct file_operations gf_fops = {
 #endif
 };
 
-#ifndef GOODIX_DRM_INTERFACE_WA
-static int goodix_fb_state_chg_callback(struct notifier_block *nb,
-					unsigned long val, void *data)
-{
-	struct gf_dev *gf_dev;
-	struct fb_event *evdata = data;
-	unsigned int blank;
-	char temp[4] = { 0x0 };
-
-	if (val != DRM_EVENT_BLANK) {
-		return 0;
-	}
-
-	pr_debug
-	    ("[info] %s go to the goodix_fb_state_chg_callback value = %d\n",
-	     __func__, (int)val);
-	gf_dev = container_of(nb, struct gf_dev, notifier);
-
-	if (evdata && evdata->data && val == DRM_EVENT_BLANK && gf_dev) {
-		blank = *(int *)(evdata->data);
-
-		switch (blank) {
-		case DRM_BLANK_POWERDOWN:
-			if (gf_dev->device_available == 1) {
-				gf_dev->fb_black = 1;
-				gf_dev->wait_finger_down = true;
-#if defined(GF_NETLINK_ENABLE)
-				temp[0] = GF_NET_EVENT_FB_BLACK;
-				sendnlmsg(temp);
-#elif defined (GF_FASYNC)
-
-				if (gf_dev->async) {
-					kill_fasync(&gf_dev->async, SIGIO,
-						    POLL_IN);
-				}
-#endif
-			}
-			break;
-
-		case DRM_BLANK_UNBLANK:
-			if (gf_dev->device_available == 1) {
-				gf_dev->fb_black = 0;
-#if defined(GF_NETLINK_ENABLE)
-				temp[0] = GF_NET_EVENT_FB_UNBLACK;
-				sendnlmsg(temp);
-#elif defined (GF_FASYNC)
-
-				if (gf_dev->async) {
-					kill_fasync(&gf_dev->async, SIGIO,
-						    POLL_IN);
-				}
-#endif
-			}
-
-			break;
-
-		default:
-			pr_debug("%s defalut\n", __func__);
-			break;
-		}
-	}
-
-	return NOTIFY_OK;
-}
-
-static struct notifier_block goodix_noti_block = {
-	.notifier_call = goodix_fb_state_chg_callback,
-};
-#endif
-
 static struct class *gf_class;
 #if defined(USE_SPI_BUS)
 static int gf_probe(struct spi_device *spi)
@@ -925,11 +760,6 @@ static int gf_probe(struct platform_device *pdev)
 	gf_dev->reset_gpio = -EINVAL;
 	gf_dev->pwr_gpio = -EINVAL;
 	gf_dev->device_available = 0;
-	gf_dev->fb_black = 0;
-	gf_dev->wait_finger_down = false;
-#ifndef GOODIX_DRM_INTERFACE_WA
-	INIT_WORK(&gf_dev->work, notification_work);
-#endif
 
 	if (gf_parse_dts(gf_dev)) {
 		goto error_hw;
@@ -1001,22 +831,10 @@ static int gf_probe(struct platform_device *pdev)
 
 	spi_clock_set(gf_dev, 1000000);
 #endif
-#ifndef GOODIX_DRM_INTERFACE_WA
-	gf_dev->notifier = goodix_noti_block;
-	drm_register_client(&gf_dev->notifier);
-#endif
 	gf_dev->irq = gf_irq_num(gf_dev);
-	fp_wakelock = wakeup_source_register(&(gf_dev->spi->dev),
-					     "fp_wakelock");
-	if (fp_wakelock == NULL)
-		goto error_wakelock;
-
+	fp_wakelock = wakeup_source_register(&gf_dev->spi->dev, "fp_wakelock");
 	pr_debug("version V%d.%d.%02d\n", VER_MAJOR, VER_MINOR, PATCH_LEVEL);
 	return status;
-
-error_wakelock:
-	pr_debug("create fp wakelock failed.\n");
-
 #ifdef AP_CONTROL_CLK
 gfspi_probe_clk_enable_failed:
 	gfspi_ioctl_clk_uninit(gf_dev);
@@ -1054,11 +872,7 @@ static int gf_remove(struct platform_device *pdev)
 {
 	struct gf_dev *gf_dev = &gf;
 	wakeup_source_unregister(fp_wakelock);
-	fp_wakelock = NULL;
 
-#if IS_ENABLED(CONFIG_BOARD_PSYCHE)
-	disable_regulator_3V0(p_3v0_vreg);
-#endif
 	/* make sure ops on existing fds can abort cleanly */
 	if (gf_dev->irq) {
 		free_irq(gf_dev->irq, gf_dev);
@@ -1078,9 +892,6 @@ static int gf_remove(struct platform_device *pdev)
 	if (gf_dev->users == 0) {
 		gf_cleanup(gf_dev);
 	}
-#ifndef GOODIX_DRM_INTERFACE_WA
-	drm_unregister_client(&gf_dev->notifier);
-#endif
 	mutex_unlock(&device_list_lock);
 	return 0;
 }
