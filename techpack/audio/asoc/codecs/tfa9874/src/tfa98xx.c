@@ -248,7 +248,7 @@ static enum tfa_error tfa98xx_tfa_start(struct tfa98xx *tfa98xx, int next_profil
 		}
 		else {
 			tfa98xx->set_mtp_cal = false;
-			pr_info("Calibration value (%d) set in mtp\n",
+			pr_debug("Calibration value (%d) set in mtp\n",
 				tfa98xx->cal_data);
 		}
 	}
@@ -386,7 +386,7 @@ static void __tfa98xx_inputdev_check_register(struct tfa98xx *tfa98xx, bool unre
 				"found a tap-detection profile (%d - %s)\n",
 				i, tfa_cont_profile_name(tfa98xx, i));
 #else
-			dev_info(tfa98xx->codec->dev,
+			dev_dbg(tfa98xx->codec->dev,
 				"found a tap-detection profile (%d - %s)\n",
 				i, tfa_cont_profile_name(tfa98xx, i));
 #endif
@@ -413,7 +413,7 @@ static void __tfa98xx_inputdev_check_register(struct tfa98xx *tfa98xx, bool unre
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
 		dev_info(tfa98xx->component->dev, "Input device already registered, skipping\n");
 #else
-		dev_info(tfa98xx->codec->dev, "Input device already registered, skipping\n");
+		dev_dbg(tfa98xx->codec->dev, "Input device already registered, skipping\n");
 #endif
 	else
 		tfa98xx_register_inputdev(tfa98xx);
@@ -604,11 +604,11 @@ static ssize_t tfa98xx_dbgfs_start_set(struct file *file,
 	mutex_unlock(&tfa98xx->dsp_lock);
 
 	if (ret) {
-		pr_info("[0x%x] Calibration start failed (%d)\n", tfa98xx->i2c->addr, ret);
+		pr_debug("[0x%x] Calibration start failed (%d)\n", tfa98xx->i2c->addr, ret);
 		return -EIO;
 	}
 	else {
-		pr_info("[0x%x] Calibration started\n", tfa98xx->i2c->addr);
+		pr_debug("[0x%x] Calibration started\n", tfa98xx->i2c->addr);
 	}
 
 	return count;
@@ -744,26 +744,26 @@ static ssize_t tfa98xx_dbgfs_dsp_state_set(struct file *file,
 
 	/* Compare strings, excluding the trailing \0 */
 	if (!strncmp(buf, start_cmd, sizeof(start_cmd) - 1)) {
-		pr_info("[0x%x] Manual triggering of dsp start...\n", tfa98xx->i2c->addr);
+		pr_debug("[0x%x] Manual triggering of dsp start...\n", tfa98xx->i2c->addr);
 		mutex_lock(&tfa98xx->dsp_lock);
 		ret = tfa98xx_tfa_start(tfa98xx, tfa98xx->profile, tfa98xx->vstep);
 		mutex_unlock(&tfa98xx->dsp_lock);
 		pr_debug("[0x%x] tfa_dev_start complete: %d\n", tfa98xx->i2c->addr, ret);
 	}
 	else if (!strncmp(buf, stop_cmd, sizeof(stop_cmd) - 1)) {
-		pr_info("[0x%x] Manual triggering of dsp stop...\n", tfa98xx->i2c->addr);
+		pr_debug("[0x%x] Manual triggering of dsp stop...\n", tfa98xx->i2c->addr);
 		mutex_lock(&tfa98xx->dsp_lock);
 		ret = tfa_dev_stop(tfa98xx->tfa);
 		mutex_unlock(&tfa98xx->dsp_lock);
 		pr_debug("[0x%x] tfa_dev_stop complete: %d\n", tfa98xx->i2c->addr, ret);
 	}
 	else if (!strncmp(buf, mon_start_cmd, sizeof(mon_start_cmd) - 1)) {
-		pr_info("[0x%x] Manual start of monitor thread...\n", tfa98xx->i2c->addr);
+		pr_debug("[0x%x] Manual start of monitor thread...\n", tfa98xx->i2c->addr);
 		queue_delayed_work(tfa98xx->tfa98xx_wq,
 			&tfa98xx->monitor_work, HZ);
 	}
 	else if (!strncmp(buf, mon_stop_cmd, sizeof(mon_stop_cmd) - 1)) {
-		pr_info("[0x%x] Manual stop of monitor thread...\n", tfa98xx->i2c->addr);
+		pr_debug("[0x%x] Manual stop of monitor thread...\n", tfa98xx->i2c->addr);
 		cancel_delayed_work_sync(&tfa98xx->monitor_work);
 	}
 	else {
@@ -1394,7 +1394,7 @@ static int tfa98xx_set_profile(struct snd_kcontrol *kcontrol,
 				/* Also re-enables the interrupts */
 				err = tfa98xx_tfa_start(tfa98xx, prof_idx, tfa98xx->vstep);
 				if (err) {
-					pr_info("Write profile error: %d\n", err);
+					pr_debug("Write profile error: %d\n", err);
 				} else {
 					pr_debug("Changed to profile %d (vstep = %d)\n",
 					         prof_idx, tfa98xx->vstep);
@@ -1582,7 +1582,7 @@ static int tfa98xx_set_cal_ctl(struct snd_kcontrol *kcontrol,
 		err = tfa98xx_write_re25(tfa98xx->tfa, tfa98xx->cal_data);
 		tfa98xx->set_mtp_cal = (err != tfa_error_ok);
 		if (tfa98xx->set_mtp_cal == false) {
-			pr_info("Calibration value (%d) set in mtp\n",
+			pr_debug("Calibration value (%d) set in mtp\n",
 				tfa98xx->cal_data);
 		}
 		mutex_unlock(&tfa98xx->dsp_lock);
@@ -2516,14 +2516,14 @@ static void tfa98xx_container_loaded(const struct firmware *cont, void *context)
 			if (strcmp(tfa_cont_profile_name(tfa98xx, i),
 				dflt_prof_name) == 0) {
 				tfa98xx->profile = i;
-				dev_info(tfa98xx->dev,
+				dev_dbg(tfa98xx->dev,
 					"changing default profile to %s (%d)\n",
 					dflt_prof_name, tfa98xx->profile);
 				break;
 			}
 		}
 		if (i >= nprof)
-			dev_info(tfa98xx->dev,
+			dev_dbg(tfa98xx->dev,
 				"Default profile override failed (%s profile not found)\n",
 				dflt_prof_name);
 	}
@@ -2607,20 +2607,20 @@ static void tfa98xx_tapdet(struct tfa98xx *tfa98xx)
 	tap_pattern = tfa_get_tap_pattern(tfa98xx->tfa);
 	switch (tap_pattern) {
 	case 0xffffffff:
-		pr_info("More than 4 taps detected! (flagTapPattern = -1)\n");
+		pr_debug("More than 4 taps detected! (flagTapPattern = -1)\n");
 		btn = BTN_0;
 		break;
 	case 0xfffffffe:
 	case 0xfe:
-		pr_info("Illegal tap detected!\n");
+		pr_debug("Illegal tap detected!\n");
 		btn = BTN_0;
 		break;
 	case 0:
-		pr_info("Unrecognized pattern! (flagTapPattern = 0)\n");
+		pr_debug("Unrecognized pattern! (flagTapPattern = 0)\n");
 		btn = BTN_0;
 		break;
 	default:
-		pr_info("Detected pattern: %d\n", tap_pattern);
+		pr_debug("Detected pattern: %d\n", tap_pattern);
 		btn = BTN_0 + tap_pattern;
 		break;
 	}
@@ -2903,7 +2903,7 @@ static int tfa98xx_startup(struct snd_pcm_substream *substream,
 		return 0;
 
 	if (tfa98xx->dsp_fw_state != TFA98XX_DSP_FW_OK) {
-		dev_info(codec->dev, "Container file not loaded\n");
+		dev_dbg(codec->dev, "Container file not loaded\n");
 		return -EINVAL;
 	}
 
@@ -2928,7 +2928,7 @@ static int tfa98xx_startup(struct snd_pcm_substream *substream,
 			 */
 			sr = tfa98xx_get_profile_sr(tfa98xx->tfa, prof);
 			if (!sr)
-				dev_info(codec->dev, "Unable to identify supported sample rate\n");
+				dev_dbg(codec->dev, "Unable to identify supported sample rate\n");
 
 			if (tfa98xx->rate_constraint.count >= TFA98XX_NUM_RATES) {
 				dev_err(codec->dev, "too many sample rates\n");
@@ -3344,7 +3344,7 @@ static int tfa98xx_probe(struct snd_soc_codec *codec)
 	snd_soc_dapm_ignore_suspend(dapm, "AIF Playback-1-34");
 	snd_soc_dapm_ignore_suspend(dapm, "AIF Capture-1-34");
 
-	dev_info(codec->dev, "tfa98xx codec registered (%s)",
+	dev_dbg(codec->dev, "tfa98xx codec registered (%s)",
 		tfa98xx->fw.name);
 
 	return ret;
@@ -3435,7 +3435,7 @@ static const struct regmap_config tfa98xx_regmap = {
 #if 0
 static void tfa98xx_irq_tfa2(struct tfa98xx *tfa98xx)
 {
-	pr_info("\n");
+	pr_debug("\n");
 
 	/*
 	 * mask interrupts
@@ -4124,7 +4124,7 @@ static int tfa98xx_i2c_probe(struct i2c_client *i2c,
 	int ret;
 	int spk_name;
 
-	pr_info("addr=0x%x\n", i2c->addr);
+	pr_debug("addr=0x%x\n", i2c->addr);
 
 	if (!i2c_check_functionality(i2c->adapter, I2C_FUNC_I2C)) {
 		dev_err(&i2c->dev, "check_functionality failed\n");
@@ -4225,7 +4225,7 @@ static int tfa98xx_i2c_probe(struct i2c_client *i2c,
 		tfa98xx->rev = reg & 0xff;
 		switch (tfa98xx->rev) {
 		case 0x72: /* tfa9872 */
-			pr_info("TFA9872 detected\n");
+			pr_debug("TFA9872 detected\n");
 			tfa98xx->flags |= TFA98XX_FLAG_MULTI_MIC_INPUTS;
 			tfa98xx->flags |= TFA98XX_FLAG_CALIBRATION_CTL;
 			tfa98xx->flags |= TFA98XX_FLAG_REMOVE_PLOP_NOISE;
@@ -4233,68 +4233,68 @@ static int tfa98xx_i2c_probe(struct i2c_client *i2c,
 			tfa98xx->flags |= TFA98XX_FLAG_TDM_DEVICE;
 			break;
 		case 0x73: /* tfa9873 */
-			pr_info("TFA9873 detected\n");
+			pr_debug("TFA9873 detected\n");
 			tfa98xx->flags |= TFA98XX_FLAG_MULTI_MIC_INPUTS;
 			tfa98xx->flags |= TFA98XX_FLAG_CALIBRATION_CTL;
 			tfa98xx->flags |= TFA98XX_FLAG_TDM_DEVICE;
 			tfa98xx->flags |= TFA98XX_FLAG_ADAPT_NOISE_MODE; /***MCH_TO_TEST***/
 			break;
 		case 0x74: /* tfa9874 */
-			pr_info("TFA9874 detected\n");
+			pr_debug("TFA9874 detected\n");
 			tfa98xx->flags |= TFA98XX_FLAG_MULTI_MIC_INPUTS;
 			tfa98xx->flags |= TFA98XX_FLAG_CALIBRATION_CTL;
 			tfa98xx->flags |= TFA98XX_FLAG_TDM_DEVICE;
 			break;
 		case 0x78: /* tfa9878 */
-			pr_info("TFA9878 detected\n");
+			pr_debug("TFA9878 detected\n");
 			tfa98xx->flags |= TFA98XX_FLAG_MULTI_MIC_INPUTS;
 			tfa98xx->flags |= TFA98XX_FLAG_CALIBRATION_CTL;
 			tfa98xx->flags |= TFA98XX_FLAG_TDM_DEVICE;
 			break;
 		case 0x88: /* tfa9888 */
-			pr_info("TFA9888 detected\n");
+			pr_debug("TFA9888 detected\n");
 			tfa98xx->flags |= TFA98XX_FLAG_STEREO_DEVICE;
 			tfa98xx->flags |= TFA98XX_FLAG_MULTI_MIC_INPUTS;
 			tfa98xx->flags |= TFA98XX_FLAG_TDM_DEVICE;
 			break;
 		case 0x13: /* tfa9912 */
-			pr_info("TFA9912 detected\n");
+			pr_debug("TFA9912 detected\n");
 			tfa98xx->flags |= TFA98XX_FLAG_MULTI_MIC_INPUTS;
 			tfa98xx->flags |= TFA98XX_FLAG_TDM_DEVICE;
 			/* tfa98xx->flags |= TFA98XX_FLAG_TAPDET_AVAILABLE; */
 			break;
 		case 0x94: /* tfa9894 */
-			pr_info("TFA9894 detected\n");
+			pr_debug("TFA9894 detected\n");
 			tfa98xx->flags |= TFA98XX_FLAG_MULTI_MIC_INPUTS;
 			tfa98xx->flags |= TFA98XX_FLAG_TDM_DEVICE;
 			tfa98xx->flags |= TFA98XX_FLAG_SKIP_INTERRUPTS;
 			break;
 		case 0x80: /* tfa9890 */
 		case 0x81: /* tfa9890 */
-			pr_info("TFA9890 detected\n");
+			pr_debug("TFA9890 detected\n");
 			tfa98xx->flags |= TFA98XX_FLAG_SKIP_INTERRUPTS;
 			break;
 		case 0x92: /* tfa9891 */
-			pr_info("TFA9891 detected\n");
+			pr_debug("TFA9891 detected\n");
 			tfa98xx->flags |= TFA98XX_FLAG_SAAM_AVAILABLE;
 			tfa98xx->flags |= TFA98XX_FLAG_SKIP_INTERRUPTS;
 			break;
 		case 0x12: /* tfa9895 */
-			pr_info("TFA9895 detected\n");
+			pr_debug("TFA9895 detected\n");
 			tfa98xx->flags |= TFA98XX_FLAG_SKIP_INTERRUPTS;
 			break;
 		case 0x97:
-			pr_info("TFA9897 detected\n");
+			pr_debug("TFA9897 detected\n");
 			tfa98xx->flags |= TFA98XX_FLAG_SKIP_INTERRUPTS;
 			tfa98xx->flags |= TFA98XX_FLAG_TDM_DEVICE;
 			break;
 		case 0x96:
-			pr_info("TFA9896 detected\n");
+			pr_debug("TFA9896 detected\n");
 			tfa98xx->flags |= TFA98XX_FLAG_SKIP_INTERRUPTS;
 			tfa98xx->flags |= TFA98XX_FLAG_TDM_DEVICE;
 			break;
 		default:
-			pr_info("Unsupported device revision (0x%x)\n", reg & 0xff);
+			pr_debug("Unsupported device revision (0x%x)\n", reg & 0xff);
 			return -EINVAL;
 		}
 	}
@@ -4353,7 +4353,7 @@ static int tfa98xx_i2c_probe(struct i2c_client *i2c,
 		}
 	}
 	else {
-		dev_info(&i2c->dev, "Skipping IRQ registration\n");
+		dev_dbg(&i2c->dev, "Skipping IRQ registration\n");
 		/* disable feature support if gpio was invalid */
 		tfa98xx->flags |= TFA98XX_FLAG_SKIP_INTERRUPTS;
 	}
@@ -4365,14 +4365,14 @@ static int tfa98xx_i2c_probe(struct i2c_client *i2c,
 	/* Register the sysfs files for climax backdoor access */
 	ret = device_create_bin_file(&i2c->dev, &dev_attr_rw);
 	if (ret)
-		dev_info(&i2c->dev, "error creating sysfs files\n");
+		dev_dbg(&i2c->dev, "error creating sysfs files\n");
 	ret = device_create_bin_file(&i2c->dev, &dev_attr_reg);
 	if (ret)
-		dev_info(&i2c->dev, "error creating sysfs files\n");
+		dev_dbg(&i2c->dev, "error creating sysfs files\n");
 
     if (0 == tfa98xx_device_count)
     	tfa98xx_init_misc_device(tfa98xx);
-	pr_info("%s Probe completed successfully!\n", __func__);
+	pr_debug("%s Probe completed successfully!\n", __func__);
 
 	INIT_LIST_HEAD(&tfa98xx->list);
 
@@ -4467,7 +4467,7 @@ static int __init tfa98xx_i2c_init(void)
 {
 	int ret = 0;
 
-	pr_info("TFA98XX driver version %s\n", TFA98XX_VERSION);
+	pr_debug("TFA98XX driver version %s\n", TFA98XX_VERSION);
 
 	/* Enable debug traces */
 	tfa98xx_kmsg_regs = trace_level & 2;
